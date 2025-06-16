@@ -1,0 +1,1 @@
+gcc main.c src/dns_config.c -I include/ -ljanssonue

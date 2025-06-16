@@ -1,12 +1,51 @@
 
-#include <stdio.h>
-#include <string.h>
-
 #include <server.h>
 #include <dns_config.h>
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <ctype.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+
 #define CONFIG_PATH "./config/config.json"
+// dns-udp standard
+#define BUFFER_SIZE 512 
+
 // compile with -ljansson
+
+
+int extract_domain(const unsigned char *packet, unsigned char *domain) {
+    int pos = 12; // skip dns header
+    int domain_pos = 0;
+    int len;
+
+    while (1) {
+        // get domain segment lenght
+        len = packet[pos];
+        // if lenght == 0 - all domain parts copied
+        if (len == 0) break;
+
+        // if packet real size > excepted size 
+        if ((pos + len + 1) > BUFFER_SIZE) return 0;
+
+        // copy domain segment from packet to domain variable
+        memcpy(domain + domain_pos, packet + pos + 1, len);
+        // update pointers
+        domain_pos += len + 1;
+        pos += len + 1;
+        // add '.' to segment (e.g. "www" + '.')
+        domain[domain_pos - 1] = '.';
+    }
+    // last dot replaced with null-term
+    domain[domain_pos - 1] = '\0';
+    return 1;
+
+}
 
 
 int main(int argc, char** argv) {
@@ -26,12 +65,65 @@ int main(int argc, char** argv) {
     printf("upstream server %s:%d\n", config.upstream_dns_ip, config.upstream_dns_port);
     printf("blacklist size: %d\n", config.blacklist_count);
     for (size_t i = 0; i < config.blacklist_count; ++i) {
+        if (i >= 5) break; 
         printf("%zu. %s\n", i, config.blacklist[i]);
-        if (i > 5) break; 
     }
 
+    // create a socket file descriptor (use datagram/DGRAM for udp)
+    int socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (socket_fd <= 0) {
+        perror("[!] ERROR: socket creation failed");
+        exit(EXIT_FAILURE);
+    }
 
-    int server_fd;
+    // client and server addresses
+    struct sockaddr_in serv_addr, cli_addr;
+    // fill with zeros
+    socklen_t cli_addr_len = sizeof(cli_addr);
+    memset(&serv_addr, 0, sizeof(serv_addr)); 
+    memset(&cli_addr, 0, sizeof(cli_addr)); 
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = inet_addr(config.listen_ip);
+    serv_addr.sin_port = htons(config.listen_port);
+
+    // bind socket with address
+    if (bind(socket_fd, (const struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        perror("[!] Error: bind failed");
+        close(socket_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("[+] Server is ready\n");
+
+    // buffers for messages
+    unsigned char buffer[BUFFER_SIZE];
+    unsigned char response[BUFFER_SIZE];
+    // buffer for extracting domain
+    unsigned char domain[256];
+
+    while (1) {
+        ssize_t valread = recvfrom(
+            socket_fd, 
+            buffer, BUFFER_SIZE, 0,
+            (struct sockaddr *)&cli_addr, &(cli_addr_len)
+        );
+        if (valread < 0) {
+            perror("[!] Error: receiving message failed");
+            // skip iteration
+            continue;
+        }
+
+        if (!extract_domain(buffer, domain)) {
+            printf("[!] Error: failed to extract domain from query\n");
+            continue;
+        }
+
+        printf("[+] Received query for: %s\n", domain);
+
+    }
+
+    close(socket_fd);
 
     return 0;
 }
